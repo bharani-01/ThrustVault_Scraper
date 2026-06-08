@@ -288,7 +288,22 @@ def wait_for_domain(url: str) -> None:
 
 ### 5.2 Multi-Tier Connection Fallback
 
-HTTP requests use a fallback matrix to maximize reliability:
+HTTP requests use a fallback matrix to maximize reliability. If one layer encounters an HTTP block, SSL error, or timeout, the fetcher automatically escalates to the next layer in the hierarchy:
+
+```mermaid
+graph TD
+    Start([Start Fetch Request]) --> Limiter[Rate Limiter: wait_for_domain]
+    Limiter --> Req[Layer 1: requests.get]
+    Req -->|HTTP 200| Success([Return HTML])
+    Req -->|Error / Block| Curl[Layer 2: curl_cffi.get]
+    Curl -->|HTTP 200| Success
+    Curl -->|Error / Block| Cloud[Layer 3: cloudscraper.get]
+    Cloud -->|HTTP 200| Success
+    Curl -->|TLS Fingerprint fail| Cloud
+    Cloud -->|Error / Block| Play[Layer 4: Playwright-stealth]
+    Play -->|Success| Success
+    Play -->|Timeout / Block| Fail([Return None / Error])
+```
 
 1. **Layer 1: Python `requests`**: Quick, direct HTTP fetch using realistic Chrome headers.
 
@@ -296,7 +311,7 @@ HTTP requests use a fallback matrix to maximize reliability:
 
 3. **Layer 3: `cloudscraper`**: Bypasses standard Cloudflare JavaScript challenges.
 
-4. **Layer 5: `Playwright-stealth`**: Launches a headless Chromium browser with anti-fingerprint stealth plugins. Used as a fail-fast last resort with strict timeouts.
+4. **Layer 4: `Playwright-stealth`**: Launches a headless Chromium browser with anti-fingerprint stealth plugins. Used as a fail-fast last resort with strict timeouts.
 
 ---
 

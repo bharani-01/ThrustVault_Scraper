@@ -191,6 +191,21 @@ To bypass the latency of sequential LLM completions, the enrichment engine paral
 
 Data collected across different catalogs can contain duplicate entries or formatting discrepancies (e.g., "T-MOTOR MN3508" vs "MN3508" vs "MN 3508").
 
+```mermaid
+graph TD
+    Start([Incoming Raw Motors List]) --> Normal[Sanitize & Normalize Names]
+    Normal --> Group[Group by Normalized Name Key]
+    Group --> Loop[Iterate Grouped Records]
+    Loop --> Check{More than 1 record in group?}
+    Check -->|No| Keep[Keep Single Record]
+    Check -->|Yes| Merge[Initialize Merged Record]
+    Merge --> Specs[Select record with most specs fields]
+    Specs --> Links[Combine & retain unique proof links]
+    Links --> Store[Store to unique motors list]
+    Keep --> Store
+    Store --> End([Final Unified Dataset])
+```
+
 ### Deduplication Engine (`utils/dedup.py`)
 * Extracts manufacturer names (T-Motor, Emax, etc.).
 
