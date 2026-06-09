@@ -493,37 +493,51 @@ class TMotorScraper(BaseScraper):
                 log.debug(f"[tmotor] Basic parse error: {e}")
         return motors
 
+    # Noise words that appear in queries but not in T-Motor product titles
+    _NOISE = {"motor", "t", "tmotor", "brushless", "bldc", "uav", "drone", "v2.0", "ii", "pro", "lite", "plus"}
+
     def _is_candidate_match(self, query: str, name: str, link: str) -> bool:
+        """
+        Returns True if ANY meaningful model token from the query appears in
+        the candidate product name or URL.
+
+        Examples that should match:
+          'T-Motor U7 V2.0 KV420'  -> token 'u7'   in 'U7 V2.0 KV420'   ✓
+          'T-Motor MN3508 KV380'   -> token 'mn3508' in product name     ✓
+          'T-Motor P80 III KV100'  -> token 'p80'  in product name       ✓
+          'T-Motor U10 Plus KV80'  -> token 'u10'  in product name       ✓
+        """
         if not query.strip():
             return True
 
+        import re
         name_lower = name.lower()
         link_lower = link.lower()
 
-        # Extract model terms from query (terms that are NOT just KV numbers or KV labels)
-        import re
-        # Clean KV patterns
+        # Strip KV ratings from query
         q_clean = re.sub(r'\b\d{3,5}\s*kv\b', '', query, flags=re.IGNORECASE)
         q_clean = re.sub(r'\bkv\s*\d{3,5}\b', '', q_clean, flags=re.IGNORECASE)
         q_clean = re.sub(r'[-/]\d{3,5}\s*kv\b', '', q_clean, flags=re.IGNORECASE)
-        q_clean = re.sub(r'[-/]kv\s*\d{3,5}\b', '', q_clean, flags=re.IGNORECASE)
+        q_clean = re.sub(r'\(\d+[Ss]\)', '', q_clean)          # remove (12S), (6S)
         q_clean = q_clean.lower().strip()
 
-        # Get tokens from q_clean
-        tokens = re.split(r'[\s\-_/]+', q_clean)
-        tokens = [t.strip() for t in tokens if len(t.strip()) >= 2]
+        # Tokenize — keep version tokens like 'v2.0', model codes like 'mn3508'
+        parts = re.split(r'[\s\-_/]+', q_clean)
+        tokens = [t.strip() for t in parts if len(t.strip()) >= 2]
 
-        # If no tokens left after removing KV, just use the original query tokens
-        if not tokens:
-            tokens = [t.strip() for t in re.split(r'[\s\-_/]+', query.lower()) if len(t.strip()) >= 2]
+        # Filter noise words — keep only model-specific tokens
+        model_tokens = [t for t in tokens if t not in self._NOISE]
 
-        # Check if ANY of the model tokens appear in candidate name or link
-        for tok in tokens:
+        # If nothing meaningful is left, fall back to raw tokens
+        if not model_tokens:
+            model_tokens = tokens
+
+        # Match: ANY model token must appear in the candidate name or link
+        for tok in model_tokens:
             if tok in name_lower or tok in link_lower:
                 return True
 
-        # Also check if the candidate name has the stator size if it's in the query
-        # E.g. search "MN3508" -> candidate "MN3508" has "3508"
+        # Extra: match 4-digit stator codes (e.g. '3508' from 'MN3508')
         nums = re.findall(r'\b\d{4}\b', query)
         for num in nums:
             if num in name_lower or num in link_lower:
