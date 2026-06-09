@@ -234,6 +234,15 @@ def _get_scraper(name: str):
         elif name == "speedybee":
             from scrapers.speedybee_scraper import SpeedbeeeScraper
             return SpeedbeeeScraper()
+        elif name == "mad":
+            from scrapers.mad_scraper import MADScraper
+            return MADScraper()
+        elif name == "kdedirect":
+            from scrapers.kdedirect_scraper import KDEDirectScraper
+            return KDEDirectScraper()
+        elif name == "sunnysky":
+            from scrapers.sunnysky_scraper import SunnySkyScraper
+            return SunnySkyScraper()
     except Exception as e:
         log.error(f"Failed to load scraper {name}: {e}")
     return None
@@ -249,7 +258,7 @@ def index():
 def start_scrape():
     data = request.get_json(silent=True) or {}
     motor_query = data.get("motor", "").strip()
-    sources     = data.get("sources", ["tmotor", "getfpv", "emax", "speedybee", "rcbenchmark"])
+    sources     = data.get("sources", ["tmotor", "getfpv", "emax", "speedybee", "rcbenchmark", "mad", "kdedirect", "sunnysky"])
     use_groq    = data.get("use_groq", True)
 
     job_id = str(uuid.uuid4())
