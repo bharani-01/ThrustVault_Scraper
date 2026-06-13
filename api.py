@@ -38,6 +38,7 @@ from scrapers.speedybee_scraper import SpeedbeeeScraper
 from scrapers.mad_scraper import MADScraper
 from scrapers.kdedirect_scraper import KDEDirectScraper
 from scrapers.sunnysky_scraper import SunnySkyScraper
+from scrapers.google.google_scraper import GoogleScraper
 
 log = get_logger("api")
 
@@ -56,20 +57,45 @@ _NOISE_WORDS = {
 }
 
 
+import re as _re
+
+def _sanitize_query(query: str) -> str:
+    """
+    Strip annotation noise from motor queries before sending to scrapers.
+    Examples:
+      'T-Motor U7 V2.0 KV420 (*9.1 kg)'  → 'T-Motor U7 V2.0 KV420'
+      'MAD 5010 EEE V2.0 KV150 (12S)'    → 'MAD 5010 EEE V2.0 KV150'
+      'T-Motor U12 II KV60 — Alpha 120A'  → 'T-Motor U12 II KV60'
+      'KDE8218XF-120 (HE) — 30.5 Dual'   → 'KDE8218XF-120'
+    """
+    q = query.strip()
+    # Remove (*...) weight annotations
+    q = _re.sub(r'\(\*[^)]*\)', '', q)
+    # Remove (12S), (6S), (HE), (Pin), (No Pin) etc.
+    q = _re.sub(r'\([^)]{1,20}\)', '', q)
+    # Remove trailing — description (em-dash / en-dash / double-hyphen ONLY)
+    # Single hyphen must NOT be stripped — part of part numbers like KDE4215XF-465
+    q = _re.sub(r'\s*(?:—|–|--)\s*.+$', '', q)
+    # Remove trailing * marker
+    q = _re.sub(r'\s*\*\s*$', '', q)
+    # Collapse whitespace
+    q = _re.sub(r'\s+', ' ', q).strip()
+    return q
+
+
 def _tokenize(text: str) -> list[str]:
     """
     Break a motor name/query into searchable tokens.
     e.g. 'MN3508 KV380'         → ['mn3508', 'kv380', '380', '3508']
          'T-Motor U7 V2.0 KV420' → ['u7', 'v2.0', 'kv420', '420', '7']
     """
-    import re
-    text = text.lower()
+    text = _sanitize_query(text).lower()
     # Split on spaces, dashes, underscores, slashes (but NOT dots — preserves 'v2.0')
-    parts = re.split(r'[\s\-_/]+', text)
+    parts = _re.split(r'[\s\-_/]+', text)
     tokens = set(parts)
     # Also extract bare numbers (e.g. '420' from 'kv420' or '420kv')
     for p in parts:
-        nums = re.findall(r'\d+', p)
+        nums = _re.findall(r'\d+', p)
         tokens.update(nums)
     # Remove noise words and empty strings
     return [t for t in tokens if t and t not in _NOISE_WORDS]
@@ -78,24 +104,41 @@ def _tokenize(text: str) -> list[str]:
 def smart_match(query: str, candidate: str) -> bool:
     """
     Returns True if ALL meaningful tokens in the query appear in the candidate.
-    Handles: 'MN3508 KV380' matching 'MN3508-380KV', 'MN 3508 380 KV', etc.
-    Skips single chars, noise words, and pure-KV-prefix tokens.
+    Handles:
+      'MN3508 KV380'  matching 'MN3508-380KV'  (reversed KV format)
+      'MAD 5008 KV240' matching 'MAD 5008 240KV' (same)
+    Skips single chars, noise words.
     """
-    import re
     if not query.strip():
         return True  # no query = match everything
 
     q_tokens = _tokenize(query)
     c_text   = candidate.lower()
 
-    # Every meaningful query token must appear somewhere in candidate text
     for tok in q_tokens:
         if len(tok) < 2:
             continue  # skip single chars
         if tok in _NOISE_WORDS:
             continue  # skip brand/category noise
-        if tok not in c_text:
-            return False
+        if tok in c_text:
+            continue  # direct hit
+
+        # Handle reversed KV formats:
+        #   query token 'kv380'  → also try '380kv', '380'
+        #   query token '380'    → also try 'kv380', '380kv'
+        kv_fwd = _re.match(r'^kv(\d+)$', tok)   # kv380 → 380
+        kv_rev = _re.match(r'^(\d+)kv$', tok)   # 380kv → 380
+        if kv_fwd:
+            num = kv_fwd.group(1)
+            if f"{num}kv" in c_text or num in c_text:
+                continue
+        elif kv_rev:
+            num = kv_rev.group(1)
+            if f"kv{num}" in c_text or num in c_text:
+                continue
+        else:
+            return False   # token not found in any form
+
     return True
 
 
@@ -111,6 +154,14 @@ def run_scrape_job(job_id: str, motor_query: str, sources: list[str], use_groq: 
         emit("log", {"message": msg, "level": level, "ts": datetime.now().strftime("%H:%M:%S")})
 
     try:
+        # ── Sanitize query first — strips (*9.1 kg), (12S), — Alpha 80A etc.
+        clean_query = _sanitize_query(motor_query)
+        if clean_query != motor_query:
+            log_msg(f"✂ Query cleaned: '{motor_query}' → '{clean_query}'", "info")
+            motor_query = clean_query
+            # Also update job so results/export reflect clean query
+            job["query"] = clean_query
+
         log_msg(f"🚀 Starting scrape for: '{motor_query}'", "info")
         log_msg(f"📡 Sources: {', '.join(sources)}", "info")
         if motor_query:
@@ -138,7 +189,8 @@ def run_scrape_job(job_id: str, motor_query: str, sources: list[str], use_groq: 
                 if motor_query.strip():
                     filtered = []
                     for r in raw:
-                        if "throttle" in r or r.get("source") == "rcbenchmark" or "label" in r:
+                        is_perf = "throttle" in r or r.get("source") == "rcbenchmark" or "label" in r
+                        if is_perf:
                             match_text = r.get("label", "")
                         else:
                             match_text = " ".join(filter(None, [
@@ -146,6 +198,8 @@ def run_scrape_job(job_id: str, motor_query: str, sources: list[str], use_groq: 
                                 r.get("name", ""),
                                 r.get("kv_rating", ""),
                                 r.get("stator_size", ""),
+                                r.get("source_url", ""),   # URL often contains model code
+                                r.get("link_motor", ""),   # same
                             ]))
                         if smart_match(motor_query, match_text):
                             filtered.append(r)
@@ -183,6 +237,23 @@ def run_scrape_job(job_id: str, motor_query: str, sources: list[str], use_groq: 
         all_motors = normalize_batch(all_motors)
         all_motors = dedup_motors(all_motors)
         log_msg(f"  → {len(all_motors)} unique motors after dedup", "info")
+
+        # Deduplicate performance points: T-Motor tables repeat each row 3×
+        seen_perf = set()
+        deduped_perf = []
+        for p in all_performance:
+            key = (
+                p.get("label", ""),
+                p.get("throttle"),
+                p.get("thrust_g"),
+                p.get("rpm"),
+            )
+            if key not in seen_perf:
+                seen_perf.add(key)
+                deduped_perf.append(p)
+        if len(deduped_perf) < len(all_performance):
+            log_msg(f"  → Deduped perf: {len(all_performance)} → {len(deduped_perf)} points", "info")
+        all_performance = deduped_perf
 
         # Groq enrichment
         if use_groq and all_motors:
@@ -250,6 +321,7 @@ def _get_scraper(name: str):
         "mad":         MADScraper,
         "kdedirect":   KDEDirectScraper,
         "sunnysky":    SunnySkyScraper,
+        "google":      GoogleScraper,
     }
     cls = _registry.get(name)
     if cls is None:
@@ -530,10 +602,12 @@ def _parse_motor_list(text: str) -> list[str]:
         line = raw_line.strip()
         if not line or skip_patterns.match(line):
             continue
-        # Remove trailing annotations like "(*9.1 kg)", "— Alpha 80A", "— 24" Prop"
-        line = re.sub(r'\s*[—\-]{1,2}\s*.+$', '', line).strip()
-        line = re.sub(r'\s*\(\*[^)]+\)', '', line).strip()
-        line = re.sub(r'\s*\(\d+[Ss]\)', '', line).strip()   # remove (12S)
+        # Remove trailing annotations — only em-dash (—), en-dash (–), or double-hyphen (--)
+        # Single hyphen (-) must NOT be stripped — it's part of part numbers like KDE4215XF-465
+        line = re.sub(r'\s*(?:—|–|--)\s*.+$', '', line).strip()
+        line = re.sub(r'\s*\(\*[^)]+\)', '', line).strip()       # (*9.1 kg)
+        line = re.sub(r'\s*\(\d+[Ss]\)', '', line).strip()       # (12S), (6S)
+        line = re.sub(r'\s*\([A-Za-z][^)]{0,15}\)', '', line).strip()  # (HE), (Pin), (No Pin)
 
         # Expand KV variants: "MN3508 KV380/KV580/KV700" → 3 motors
         kv_variants = re.findall(r'[Kk][Vv]\s*(\d{2,5})', line)
